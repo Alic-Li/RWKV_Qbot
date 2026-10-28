@@ -70,7 +70,7 @@ func LoadDotEnv(path string) error {
 	return nil
 }
 func Load() (Config, error) {
-	c := Config{AppID: os.Getenv("APP_ID"), AppSecret: os.Getenv("APP_SECRET"), AccessID: os.Getenv("CF_ACCESS_CLIENT_ID"), AccessSecret: os.Getenv("CF_ACCESS_CLIENT_SECRET"), Listen: "127.0.0.1:8080", Model: "rwkv-1.5b", Workers: 4, Queue: 16, SessionLimit: 1000, ReplyRunes: 1500, Timeout: 90 * time.Second, SessionTTL: 24 * time.Hour, Generation: rwkv.Defaults()}
+	c := Config{AppID: os.Getenv("APP_ID"), AppSecret: os.Getenv("APP_SECRET"), AccessID: os.Getenv("CF_ACCESS_CLIENT_ID"), AccessSecret: os.Getenv("CF_ACCESS_CLIENT_SECRET"), Listen: "127.0.0.1:8653", URL: "http://127.0.0.1:8000/v1/batch/completions", Model: "rwkv-1.5b", Workers: 4, Queue: 16, SessionLimit: 1000, ReplyRunes: 1500, Timeout: 90 * time.Second, SessionTTL: 24 * time.Hour, Generation: rwkv.Defaults()}
 	if c.AppID == "" || c.AppSecret == "" {
 		return c, errors.New("APP_ID and APP_SECRET are required")
 	}
@@ -81,13 +81,6 @@ func Load() (Config, error) {
 		if s := os.Getenv(k); s != "" {
 			*p = s
 		}
-	}
-	origins := map[string]string{"rwkv-1.5b": "https://api-1b5.rwkvos.com", "rwkv-3b": "https://api-3b.rwkvos.com", "rwkv-7b": "https://api-7b.rwkvos.com", "rwkv-13b": "https://api-13b.rwkvos.com"}
-	if c.URL == "" {
-		if origins[c.Model] == "" {
-			return c, errors.New("custom RWKV_MODEL requires RWKV_API_URL")
-		}
-		c.URL = origins[c.Model] + "/v1/batch/completions"
 	}
 	u, e := url.Parse(c.URL)
 	if e != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "https" && !(u.Scheme == "http" && (u.Hostname() == "127.0.0.1" || u.Hostname() == "localhost" || u.Hostname() == "::1"))) {

@@ -24,7 +24,7 @@ func TestConfigDefaultsAndValidation(t *testing.T) {
 	t.Setenv("APP_ID", "test")
 	t.Setenv("APP_SECRET", "test-secret")
 	c, e := Load()
-	if e != nil || c.Generation.TopK != 50 || c.URL != "https://api-1b5.rwkvos.com/v1/batch/completions" {
+	if e != nil || c.Generation.TopK != 50 || c.URL != "http://127.0.0.1:8000/v1/batch/completions" || c.Listen != "127.0.0.1:8653" {
 		t.Fatal("defaults", e)
 	}
 	for _, v := range []string{"https://user:secret@example.com/v1", "https://example.com/?secret=value", "http://example.com/v1"} {

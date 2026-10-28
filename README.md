@@ -1,6 +1,6 @@
 # QQ RWKV Bot
 
-纯 Go 的腾讯官方 QQ 机器人服务，使用 `github.com/tencent-connect/botgo v0.2.1`，接收官方 Webhook 的私聊 `C2C_MESSAGE_CREATE`、群 @ `GROUP_AT_MESSAGE_CREATE`，调用 RWKV 原始 batch completions，聚合 SSE 后被动回复。无需 WebSocket、数据库或 GPU 依赖；W7900 推理由已有的 RWKV 服务负责。
+纯 Go 的腾讯官方 QQ 机器人服务，使用 `github.com/tencent-connect/botgo v0.2.1`，接收官方 Webhook 的私聊 `C2C_MESSAGE_CREATE`、群 @ `GROUP_AT_MESSAGE_CREATE`，调用 RWKV 原始 batch completions，聚合 SSE 后被动回复。无需 WebSocket、数据库或 GPU 依赖；推理由本机 `127.0.0.1:8000` 的 RWKV 服务负责；机器人默认监听 `127.0.0.1:8653`，公网回调由自行配置的 Cloudflare Tunnel 转发。
 
 ## 本地运行
 
@@ -15,7 +15,7 @@ go run ./cmd/qq-rwkv-bot
 另一个终端：
 
 ```sh
-curl -fsS http://127.0.0.1:8080/healthz
+curl -fsS http://127.0.0.1:8653/healthz
 ```
 
 `/healthz` 返回 `ok`，只检查进程存活，不消耗 QQ/RWKV 配额，也不代表上游凭据或网络可用。程序自动加载工作目录的 `.env`，已有环境变量优先。支持 `KEY=value`、单/双引号和整行注释，不进行 shell 变量替换，也不支持行尾注释。`.env`、`.env.*`（除示例）及 `bin/` 已加入 `.gitignore`；初始目录没有 `.git`，本实现没有初始化 Git 或提交任何文件。
@@ -25,20 +25,20 @@ curl -fsS http://127.0.0.1:8080/healthz
 | 变量 | 默认值 / 含义 |
 | --- | --- |
 | `APP_ID`、`APP_SECRET` | 必填，QQ 官方凭据；Secret 同时用于 Webhook Ed25519 验签 |
-| `CF_ACCESS_CLIENT_ID`、`CF_ACCESS_CLIENT_SECRET` | 成对填写，仅发往 RWKV；受 Access 保护的现有上游需要这两个值 |
-| `RWKV_MODEL` | `rwkv-1.5b`；还支持 `rwkv-3b`、`rwkv-7b`、`rwkv-13b` 的博客路由 |
-| `RWKV_API_URL` | 可选，**完整** `/v1/batch/completions` 地址；自定义模型必须指定 |
+| `CF_ACCESS_CLIENT_ID`、`CF_ACCESS_CLIENT_SECRET` | 本地 RWKV 无需填写；仅在上游启用 Cloudflare Access 时成对配置 |
+| `RWKV_MODEL` | `rwkv-1.5b`；用于上下文预算，不决定 API 地址 |
+| `RWKV_API_URL` | `http://127.0.0.1:8000/v1/batch/completions`；可覆盖为其他**完整**接口地址 |
 | `RWKV_MAX_TOKENS` | `2048` |
 | `RWKV_TEMPERATURE` / `RWKV_TOP_K` / `RWKV_TOP_P` | `1.0` / `50` / `0.3` |
 | `RWKV_ALPHA_PRESENCE` / `RWKV_ALPHA_FREQUENCY` / `RWKV_ALPHA_DECAY` | `1.0` / `0.1` / `0.99` |
 | `RWKV_CHUNK_SIZE` | `1` |
 | `RWKV_TIMEOUT` | `90s`，最大 `180s` |
-| `LISTEN_ADDR` | `127.0.0.1:8080` |
+| `LISTEN_ADDR` | `127.0.0.1:8653` |
 | `WORKERS` / `QUEUE_PER_WORKER` | `4` / `16`；最大 `64` / `256` |
 | `SESSION_LIMIT` / `SESSION_TTL` | `1000` / `24h`；容量上限 `10000`，过期或最旧记录被淘汰 |
 | `QQ_REPLY_RUNES` | `1500`，最大 `2000`；超长答案截断并注明 |
 
-默认路由严格来自博客：`rwkv-1.5b → https://api-1b5.rwkvos.com`，其余分别为 `api-3b`、`api-7b`、`api-13b`，追加 `/v1/batch/completions`。`model` 是路由/上下文预算配置，**不会添加到原协议的请求体**。自定义地址只接受 HTTPS 或 loopback HTTP，不允许 URL 用户信息、查询参数和 fragment。出站请求拒绝重定向，避免转发 Cloudflare 凭据。
+默认调用本机 RWKV 的 `/v1/batch/completions` 接口，保持原始 batch completions + SSE 协议；本地推理服务需提供此接口。`RWKV_MODEL` 只用于上下文预算，修改模型不会切换 API 地址，**不会添加到原协议的请求体**。自定义地址只接受 HTTPS 或 loopback HTTP，不允许 URL 用户信息、查询参数和 fragment。出站请求拒绝重定向，避免转发 Cloudflare 凭据。
 
 ## RWKV 迁移依据
 
@@ -58,17 +58,17 @@ QQ 适配层选择仅在生成和发送均成功后提交这一轮历史，失�
 ## QQ 与 Cloudflare Tunnel
 
 1. 在 QQ 开放平台创建机器人，配置 AppID / AppSecret，获得所需的私聊和群聊权限；开发阶段将测试用户/群加入平台沙箱名单。
-2. 在 Linux 或本机启动服务，通过已有 Cloudflare Tunnel 将一个公网 HTTPS 主机转发到 `http://127.0.0.1:8080`。例如 Tunnel ingress 配置片段（补充你自己的 tunnel ID / credentials-file）：
+2. 在 Linux 或本机启动服务，通过已有 Cloudflare Tunnel 将一个公网 HTTPS 主机转发到 `http://127.0.0.1:8653`。例如 Tunnel ingress 配置片段（补充你自己的 tunnel ID / credentials-file）：
 
    ```yaml
    ingress:
      - hostname: qq-bot.example.com
-       service: http://127.0.0.1:8080
+       service: http://127.0.0.1:8653
      - service: http_status:404
    ```
 
 3. 平台 Webhook 填写 `https://qq-bot.example.com/webhook/qq`，订阅 `C2C_MESSAGE_CREATE` 和 `GROUP_AT_MESSAGE_CREATE`（`GROUP_AND_C2C_EVENT` / `1<<25`）。保存时平台会发送 `op=13`，服务返回签名挑战结果。
-4. **此 Webhook 域名/路径不能启用 Cloudflare Access 交互式登录、浏览器挑战或验证码。** 可使用独立公开主机；若已有 Access 应用覆盖它，需要为回调建立适当的 bypass。安全边界是 QQ 官方 Ed25519 签名。RWKV 域名继续使用 Access Service Token。
+4. **此 Webhook 域名/路径不能启用 Cloudflare Access 交互式登录、浏览器挑战或验证码。** 可使用独立公开主机；若已有 Access 应用覆盖它，需要为回调建立适当的 bypass。安全边界是 QQ 官方 Ed25519 签名。本地 RWKV 接口无需经过 Tunnel，也无需 Access Service Token。
 5. 保持服务器时钟同步。每次回调验证原始 body、签名时间戳（过去 5 分钟 / 未来 1 分钟）及可用的 `X-Bot-Appid`。无签名请求返回 401，body 超过 64 KiB 返回 413。
 6. QQ 发文字或在有权限的群 @ 机器人；`/reset` 清理当前用户在当前会话中的上下文，不影响别人和其他群。群事件的 content 按当前官方文档已去除机器人 @ 前缀，不会删除用户自己正文中的其他 @。
 
@@ -84,9 +84,21 @@ QQ 平台配置、Tunnel 域名、实际凭据及上游可达性需要在部署�
 - 第一版仅文字，一次回复，超长文本显式截断。附件不送入模型，空内容给出文字提示。内容审核、接口权限、回复时效和频控仍以 QQ 平台为准。
 - 会话、去重表、已 ACK 的任务都在内存。**单实例运行；重启会丢失历史和未完成任务，不提供持久化 exactly-once 保证。** SIGTERM 停止接收，最多 25 秒排空业务队列，之后取消上游请求。
 
+## 收到消息但没有回复
+
+先向机器人发送 `/reset`：它直接调用 QQ 回复接口，不经过模型。若能收到“上下文已清理。”，说明 QQ 发送链路可用，再检查模型生成。
+
+日志中的 `accepted=true` 只表示消息成功入队。每次处理分配一个本地 `job` 编号，可按编号查看 `message processing started` → `RWKV inference started` → `RWKV first text received` → `RWKV inference completed` → `QQ reply started` → `QQ reply succeeded`。仅首段文本到达时记录一条日志，不记录正文或凭据；普通消息需等待完整生成后才回复，默认生成超时为 90 秒。
+
+- 停在 `RWKV inference started`：检查模型服务是否接收请求；超时后会记录失败并尝试发送失败提示。
+- 收到首段文本但迟迟不完成：模型仍在生成，或 SSE 没有发送 `[DONE]` / 结束标记。
+- `RWKV inference failed`：查看 HTTP 状态、超时或 SSE 协议错误；本地接口需支持 `/v1/batch/completions`，只提供 OpenAI chat completions 的服务不能直接使用。
+- `QQ reply failed`：查看 token / reply 错误及 HTTP、业务错误码，检查凭据、权限及部署网络。
+- Webhook 的 `body_too_large`（413）、`body_read_timeout`（408）、`body_read_failed`（400）分别表示超过 64 KiB、读取超时和请求体读取失败，与此前已入队的消息分开处理。
+
 ## Linux x86_64 / systemd
 
-macOS 交叉编译（不依赖 ROCm）：
+本地 Linux x86_64 编译（不依赖 ROCm，也可在 macOS 上交叉编译）：
 
 ```sh
 mkdir -p bin
@@ -106,7 +118,7 @@ sudo systemctl enable --now qq-rwkv-bot
 sudo journalctl -u qq-rwkv-bot -f
 ```
 
-服务器需要系统 CA 证书与到 QQ / RWKV 的出站 HTTPS。Tunnel 建议作为独立 systemd 服务运行；Go 进程只监听 loopback。部署后检查 `/healthz`、平台回调验证、私聊/群聊回复、连续两轮上下文和 `/reset`。
+运行前确认本地 RWKV 已监听 `127.0.0.1:8000`，环境文件中的 `LISTEN_ADDR=127.0.0.1:8653`、`RWKV_API_URL=http://127.0.0.1:8000/v1/batch/completions` 已更新；本地模型不需要 `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET`，可将其留空。服务器需要系统 CA 证书与到 QQ 的出站 HTTPS，以及到本地 RWKV 的 HTTP 连接。Tunnel 建议作为独立 systemd 服务运行；Go 进程只监听 loopback。部署后检查 `/healthz`、平台回调验证、私聊/群聊回复、连续两轮上下文和 `/reset`。
 
 ## 验证
 

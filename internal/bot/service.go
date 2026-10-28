@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"qq-rwkv-bot/internal/qq"
@@ -38,6 +39,7 @@ type Service struct {
 	closed    bool
 	seen      map[string]time.Time
 	lastSweep time.Time
+	nextJob   atomic.Uint64
 }
 
 func New(lm Completer, replier Replier, store *session.Store, opts Options, logger *slog.Logger) *Service {
@@ -117,23 +119,28 @@ func (s *Service) Close(ctx context.Context) error {
 	}
 }
 func (s *Service) process(m qq.Message) {
+	log := s.log.With("job", s.nextJob.Add(1))
+	started := time.Now()
 	defer func() {
 		if recover() != nil {
-			s.log.Error("message processing panic recovered")
+			log.Error("message processing panic recovered")
 		}
 	}()
 	// Bound queue waiting as well as inference to preserve QQ's passive reply window.
 	if time.Since(m.Received) > 3*time.Minute {
-		s.log.Warn("expired queued message skipped")
+		log.Warn("expired queued message skipped")
 		return
 	}
+	log.Info("message processing started", "message_age_ms", time.Since(m.Received).Milliseconds())
 	ctx, cancel := context.WithDeadline(s.ctx, m.Received.Add(4*time.Minute))
 	defer cancel()
 	send := func(text string) bool {
+		log.Info("QQ reply started")
 		if err := s.qq.Reply(ctx, m, text, 1); err != nil {
-			s.log.Error("QQ reply failed", "error", err)
+			log.Error("QQ reply failed", "error", err, "elapsed_ms", time.Since(started).Milliseconds())
 			return false
 		}
+		log.Info("QQ reply succeeded", "elapsed_ms", time.Since(started).Milliseconds())
 		return true
 	}
 	input := rwkv.Normalize(m.Content)
@@ -153,13 +160,22 @@ func (s *Service) process(m qq.Message) {
 	history := append(s.store.Get(m.Key()), rwkv.Message{Role: "user", Content: input})
 	history = rwkv.Context(history, s.opts.Model)
 	infer, cancelInfer := context.WithTimeout(ctx, s.opts.Timeout)
-	raw, err := s.lm.Complete(infer, history, nil)
+	log.Info("RWKV inference started", "timeout_ms", s.opts.Timeout.Milliseconds())
+	inferStarted := time.Now()
+	firstText := true
+	raw, err := s.lm.Complete(infer, history, func(string) {
+		if firstText {
+			firstText = false
+			log.Info("RWKV first text received", "elapsed_ms", time.Since(inferStarted).Milliseconds())
+		}
+	})
 	cancelInfer()
 	if err != nil {
-		s.log.Warn("RWKV inference failed", "error", err)
+		log.Warn("RWKV inference failed", "error", err, "elapsed_ms", time.Since(inferStarted).Milliseconds())
 		send("生成失败或超时，请稍后重试。")
 		return
 	}
+	log.Info("RWKV inference completed", "elapsed_ms", time.Since(inferStarted).Milliseconds())
 	answer := strings.TrimSpace(rwkv.Answer(raw))
 	if answer == "" {
 		send("本次没有生成有效回答，请重试或使用 /reset。")

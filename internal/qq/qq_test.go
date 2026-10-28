@@ -1,11 +1,14 @@
 package qq
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -19,6 +22,52 @@ import (
 )
 
 const testSecret = "unit-test-only-secret"
+
+type failingBody struct{ err error }
+
+func (b failingBody) Read([]byte) (int, error) { return 0, b.err }
+func (b failingBody) Close() error             { return nil }
+
+func TestWebhookBodyReadErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		body      io.ReadCloser
+		want      int
+		readError string
+	}{
+		{"too large", io.NopCloser(strings.NewReader(strings.Repeat("x", 65537))), 413, "size_limit"},
+		{"timeout", failingBody{context.DeadlineExceeded}, 408, "timeout"},
+		{"truncated", io.NopCloser(io.MultiReader(strings.NewReader("private-body"), failingBody{io.ErrUnexpectedEOF})), 400, "unexpected_eof"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest("POST", "/webhook/qq", nil)
+			r.Body = tc.body
+			w := httptest.NewRecorder()
+			var logs bytes.Buffer
+			h := Webhook{Logger: slog.New(slog.NewJSONHandler(&logs, nil)), Submit: func(Message) bool {
+				t.Error("unreadable event submitted")
+				return true
+			}}
+			h.ServeHTTP(w, r)
+			if w.Code != tc.want {
+				t.Fatalf("status = %d, want %d", w.Code, tc.want)
+			}
+			var entry struct {
+				ReadError     string `json:"read_error"`
+				ReceivedBytes int    `json:"received_bytes"`
+			}
+			if err := json.Unmarshal(logs.Bytes(), &entry); err != nil || entry.ReadError != tc.readError {
+				t.Fatalf("unexpected read diagnostic: %s", logs.String())
+			}
+			if tc.name == "truncated" && entry.ReceivedBytes != len("private-body") {
+				t.Fatal("missing partial read count")
+			}
+			if strings.Contains(logs.String(), "private-body") {
+				t.Fatal("body leaked into diagnostic")
+			}
+		})
+	}
+}
 
 func signed(body string, age time.Duration) *http.Request {
 	r := httptest.NewRequest("POST", "/webhook/qq", strings.NewReader(body))

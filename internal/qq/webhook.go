@@ -1,9 +1,13 @@
 package qq
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -35,9 +39,10 @@ type Webhook struct {
 
 func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	reject := func(status int, reason string) {
+	reject := func(status int, reason string, details ...any) {
 		if h.Logger != nil {
-			h.Logger.Warn("QQ webhook rejected", "status", status, "reason", reason)
+			attrs := append([]any{"status", status, "reason", reason}, details...)
+			h.Logger.Warn("QQ webhook rejected", attrs...)
 		}
 		w.WriteHeader(status)
 	}
@@ -45,9 +50,29 @@ func (h *Webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reject(405, "method_not_post")
 		return
 	}
+	readStarted := time.Now()
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
 	if err != nil {
-		reject(413, "body_read_failed_or_too_large")
+		var tooLarge *http.MaxBytesError
+		var networkError net.Error
+		status, reason, readError := 400, "body_read_failed", "other"
+		switch {
+		case errors.As(err, &tooLarge):
+			status, reason, readError = 413, "body_too_large", "size_limit"
+		case errors.As(err, &networkError) && networkError.Timeout():
+			status, reason, readError = 408, "body_read_timeout", "timeout"
+		case errors.Is(err, io.ErrUnexpectedEOF):
+			readError = "unexpected_eof"
+		case errors.Is(err, context.Canceled):
+			readError = "canceled"
+		case errors.Is(err, net.ErrClosed), errors.Is(err, http.ErrBodyReadAfterClose):
+			readError = "closed"
+		}
+		// Record framing and counts, never body, signatures, or arbitrary error text.
+		reject(status, reason, "read_error", readError, "error_type", fmt.Sprintf("%T", err),
+			"received_bytes", len(body), "content_length", r.ContentLength,
+			"chunked", len(r.TransferEncoding) > 0, "expect_continue", strings.EqualFold(r.Header.Get("Expect"), "100-continue"),
+			"signature_present", r.Header.Get(signature.HeaderSig) != "", "elapsed_ms", time.Since(readStarted).Milliseconds())
 		return
 	}
 	if id := r.Header.Get("X-Bot-Appid"); id != "" && id != h.AppID {

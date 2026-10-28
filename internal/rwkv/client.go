@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -39,6 +40,18 @@ func HTTPClient(timeout time.Duration) *http.Client {
 
 var ErrUpstream = errors.New("rwkv upstream failure")
 
+// Keep transport details (which can contain URLs or credentials) out of logs.
+func upstreamError(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return fmt.Errorf("%w (%s)", ErrUpstream, ctx.Err())
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return fmt.Errorf("%w (timeout)", ErrUpstream)
+	}
+	return fmt.Errorf("%w (transport or stream read failed)", ErrUpstream)
+}
+
 // Complete retains raw reasoning in history; onText is the extension point for streaming replies.
 func (c *Client) Complete(ctx context.Context, messages []Message, onText func(string)) (string, error) {
 	body := struct {
@@ -59,13 +72,20 @@ func (c *Client) Complete(ctx context.Context, messages []Message, onText func(s
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return "", ErrUpstream
+		return "", upstreamError(ctx, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 || !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("%w (HTTP %d)", ErrUpstream, resp.StatusCode)
 	}
-	return ReadStream(resp.Body, onText)
+	if !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		return "", fmt.Errorf("%w (expected SSE response, HTTP %d)", ErrUpstream, resp.StatusCode)
+	}
+	text, err := ReadStream(resp.Body, onText)
+	if err != nil && ctx.Err() != nil {
+		return "", upstreamError(ctx, err)
+	}
+	return text, err
 }
 
 // ReadStream mirrors sse.ts + continuationStream: slot zero, CRLF, DONE,
@@ -162,5 +182,8 @@ func ReadStream(r io.Reader, onText func(string)) (string, error) {
 			pending = pending[cut:]
 		}
 	}
-	return "", ErrUpstream // EOF without DONE (or stop marker) is a truncated response.
+	if err := scanner.Err(); err != nil {
+		return "", upstreamError(context.Background(), err)
+	}
+	return "", fmt.Errorf("%w (stream ended without DONE or stop marker)", ErrUpstream)
 }
