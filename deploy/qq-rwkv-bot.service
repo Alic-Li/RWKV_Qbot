@@ -1,0 +1,23 @@
+[Unit]
+Description=QQ official RWKV bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qqbot
+Group=qqbot
+WorkingDirectory=/opt/qq-rwkv-bot
+EnvironmentFile=/etc/qq-rwkv-bot.env
+ExecStart=/opt/qq-rwkv-bot/qq-rwkv-bot
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
